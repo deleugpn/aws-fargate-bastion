@@ -1,0 +1,112 @@
+Description: Bastion Host for VPC on Fargate
+
+Parameters:
+  CommitHash:
+    Type: String
+
+Resources:
+  Domain:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue HostedZone
+      Name:
+        Fn::Sub:
+          - 'bastion.ssh.${Suffix}'
+          - Suffix: !ImportValue EnvZone
+      Type: A
+      ResourceRecords:
+        - 8.8.8.8 # Create the DNS pointing to an invalid IP address. We will update it on the DNS Propagator container.
+      TTL: 600
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !ImportValue ClusterName
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref ServiceTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!Ref BastionSecurityGroup]
+          Subnets: !Split [',', !ImportValue PublicSubnets]
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH connection into the VPC
+      VpcId: !ImportValue Vpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  ServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Environment:
+            - Name: CUSTOMERGAUGE_REGION
+              Value: !ImportValue EnvRegion
+          Essential: true
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.eu-west-1.amazonaws.com/bastion:openssh-${CommitHash}'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: task
+          Name: bastion
+          PortMappings:
+            - ContainerPort: 22
+          Privileged: 'false'
+
+        - Environment:
+            - Name: CUSTOMERGAUGE_REGION
+              Value: !ImportValue EnvRegion
+            - Name: HOSTED_ZONE
+              Value: !ImportValue HostedZone
+          Essential: false
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.eu-west-1.amazonaws.com/bastion:dns-propagator-${CommitHash}'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: task
+          Name: dns-propagator
+          Privileged: 'false'
+      Cpu: 512
+      Memory: 1024
+      Family: bastion
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt BastionTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt BastionTaskExecutionRole.Arn
+      RequiresCompatibilities: [FARGATE]
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  BastionTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: BastionPermissions
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                Resource:
+                  - '*'

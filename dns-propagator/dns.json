@@ -1,0 +1,11 @@
+{
+  "Comment": "Update Route 53 Bastion DNS",
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "bastion.ssh.!DOMAIN!",
+      "Type": "A",
+      "TTL": 600,
+      "ResourceRecords": [{ "Value": !NEW_IP!}]
+    }}]
+}

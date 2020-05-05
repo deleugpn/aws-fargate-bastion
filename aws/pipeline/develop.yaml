@@ -1,0 +1,125 @@
+Description: Bastion Host for the VPC powered by Fargate
+
+Parameters:
+  AuthorizedKeys:
+    Type: AWS::SSM::Parameter::Value<String>
+    NoEcho: true
+    Default: /bastion/public-key
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: bastion
+      RepositoryPolicyText:
+        Version: 2008-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+              Service: codebuild.amazonaws.com
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          #TODO: include authorized keys per environment
+          - Name: REPOSITORY_URL
+            Value: !Join ['', [!ImportValue DockerRegistry, !Ref Repository]]
+          - Name: REGISTRY_URL
+            Value: !ImportValue DockerRegistry
+          - Name: AUTHORIZED_KEY
+            Value: !Ref AuthorizedKeys
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:2.0
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+      ServiceRole: !ImportValue GeneralPurposeCodeBuildRoleArn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: aws/pipeline/buildspec.yaml
+      TimeoutInMinutes: 10
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !ImportValue GeneralPurposeSourceCodeStorage
+        Type: S3
+      Name: bastion
+      RestartExecutionOnUpdate: false
+      RoleArn: !ImportValue GeneralPurposeCodePipelineRoleArn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: cgauge
+                Repo: bastion
+                Branch: develop
+                OAuthToken: !ImportValue GitHubOauthToken
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: source_code
+
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuild
+                PrimarySource: source_code
+              InputArtifacts:
+                - Name: source_code
+              OutputArtifacts:
+                - Name: build_hash
+
+        - Name: Deploy
+          Actions:
+            - Name: Service
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !ImportValue GeneralPurposeCloudFormationRoleArn
+                StackName: bastion-service
+                TemplateConfiguration: build_hash::build.hash.json
+                TemplatePath: source_code::aws/deploy/template.yaml
+              InputArtifacts:
+                - Name: build_hash
+                - Name: source_code
+              RunOrder: 1
+
+  GithubWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !ImportValue GitHubOauthToken
+      RegisterWithThirdParty: 'true'
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: Source
+      TargetPipelineVersion: !GetAtt CodePipeline.Version

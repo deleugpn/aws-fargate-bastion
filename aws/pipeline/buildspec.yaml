@@ -1,0 +1,26 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+
+  pre_build:
+    commands:
+      - $(aws ecr get-login --region $AWS_REGION --no-include-email)
+      - TAG="$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 8)"
+      - OPENSSH_URL="${REPOSITORY_URL}:openssh-${TAG}"
+      - DNS_PROPAGATOR_URL="${REPOSITORY_URL}:dns-propagator-${TAG}"
+
+  build:
+    commands:
+      - 'echo "{\"Parameters\":{\"CommitHash\":\"$TAG\"}}" > build.hash.json'
+      - echo ${AUTHORIZED_KEY} > ./openssh/authorized_keys
+      - docker build --tag "$OPENSSH_URL" ./openssh
+      - docker build --tag "$DNS_PROPAGATOR_URL" ./dns-propagator
+      - docker push "$OPENSSH_URL"
+      - docker push "$DNS_PROPAGATOR_URL"
+
+artifacts:
+  files:
+    - build.hash.json
